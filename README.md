@@ -1,5 +1,7 @@
 # ABU Robocon 2027 Strategy Simulator
 
+> **Credits:** 本シミュレータは **senag** 氏によって開発・設計された ABU Robocon 2027 戦略シミュレータです。
+
 新しいアプリは [field-simulator.html](field-simulator.html) です。HTMLをブラウザで開くだけで動きます。インストール、サーバー起動、インターネット接続は不要です。`sim/` と `vendor/` は同じフォルダー構成のまま必要です。
 
 共有ZIPは「すべて展開」してから起動してください。[起動案内](00_START_HERE.txt) と [戦略追加ガイド](STRATEGY_GUIDE.md) を同梱しています。共有版は試合ログ・検証画像・作成者の環境専用のブラウザテストを除きます。各端末で独立して動き、端末間で対戦を同期する機能はありません。
