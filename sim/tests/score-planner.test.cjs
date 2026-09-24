@@ -6,7 +6,7 @@ const P = require('../score-planner.js');
 const C = require('../controllers.js');
 
 function world(config = {}, team = 'red') {
-  const s = new Simulation(config);
+  const s = new Simulation({ redBrPlan: 'score-search', blueBrPlan: 'score-search', ...config });
   for (const r of s.robots) r.auto = false;
   const r = s.robot(`${team}BR`);
   Object.assign(r, F.points[team].home, { z: .6, enteredL1: true, brain: { stage: 'choose' } });
@@ -41,10 +41,10 @@ function execute(s, r, response) {
 }
 const ops = response => response.actions.filter(a => a.type !== 'move');
 
-test('both teams default to score search; first action and each completed batch return to scan', () => {
+test('both teams default to efficient search; first action and each completed batch return to scan', () => {
   const s = new Simulation();
   for (const team of ['red', 'blue']) {
-    const r = s.robot(`${team}BR`); assert.equal(s.config[`${team}BrPlan`], 'score-search');
+    const r = s.robot(`${team}BR`); assert.equal(s.config[`${team}BrPlan`], 'efficient');
     assert.deepEqual(ops(C.next(s.view(r))).map(a => a.type), ['scan']);
     Object.assign(r, F.points[team].home); scan(s, r); r.brain.stage = 'return';
     assert.deepEqual(ops(C.next(s.view(r))).map(a => a.type), ['scan']);
@@ -87,7 +87,7 @@ test('movement estimate scales speed and acceleration but not scan or handling d
   for (const factor of [1, .75, .5, .25]) {
     const { s, r } = world({ redSpeed: factor }); hold(s, r, 'earth'); hold(s, r, 'earth');
     const v = scan(s, r), plan = P.plan(v); seconds.push(plan.completeSeconds);
-    assert.equal(v.motion.speedFactor, factor); assert.equal(v.motion.scanSeconds, 3); assert.equal(plan.gain, 60);
+    assert.equal(v.motion.speedFactor, factor); assert.equal(v.motion.scanSeconds, 1); assert.equal(plan.gain, 60);
     assert.equal(v.motion.blueSpeed, undefined); assert.equal(v.robots, undefined);
   }
   for (let i = 1; i < seconds.length; i++) assert.ok(seconds[i] > seconds[i - 1]);
@@ -130,11 +130,11 @@ test('mixed Earth1 foundation can be completed with E1+S1 in the correct order',
   execute(s, r, P.next(v)); assert.equal(s.scores().red.tower, 120); assert.equal(s.scores().blue.tower, 20);
 });
 
-test('top-down receipt obeys stock stacks, two-item capacity and a new scan before work', () => {
+test('typed stock receipt obeys two-item capacity and a new scan before work', () => {
   const { s, r } = world(); seed(s, 'u1', ['blue']);
   const e = stock(s, r, 'earth'), sky = stock(s, r, 'sky');
   const v = scan(s, r), p = P.plan(v), response = P.next(v);
-  assert.deepEqual(p.picked, [sky.id, e.id]); assert.equal(p.gain, 120);
+  assert.notEqual(e.slot, sky.slot); assert.deepEqual([...p.picked].sort(), [sky.id, e.id].sort()); assert.equal(p.gain, 120);
   assert.deepEqual(ops(response).map(a => a.type), ['receive', 'receive', 'scan']);
   execute(s, r, response); assert.equal(r.cargo.length, 2); assert.equal(r.scanLoaded, true);
   assert.equal(r.observation.stock.length, 0); assert.equal(P.plan(s.view(r)).gain, 120);
@@ -156,11 +156,13 @@ test('opponent Earth is not recoverable, nor is Earth underneath a Sky', () => {
 });
 
 test('Mustika requires the observed mandate and receipt; it never ends the match', () => {
-  const { s, r } = world(); stock(s, r, 'mustika');
+  const { s, r } = world(), tr = s.robot('redTR'); hold(s, tr, 'mustika');
+  Object.assign(tr, F.points.red.transferTR, { z: .6 });
   assert.equal(P.plan(scan(s, r)), null);
-  s.sanctuary.red = 0; const v = scan(s, r), p = P.plan(v);
-  assert.equal(p.horizonGain, 250); assert.deepEqual(p.picked, ['M']); assert.equal(p.tasks[0].type, 'enshrine');
-  execute(s, r, P.next(v)); execute(s, r, P.next(s.view(r)));
+  s.sanctuary.red = 0; execute(s, r, C.next(scan(s, r)));
+  const p = P.plan(s.view(r));
+  assert.equal(p.horizonGain, 250); assert.deepEqual(p.picked, []); assert.equal(p.tasks[0].type, 'enshrine');
+  execute(s, r, P.next(s.view(r)));
   assert.equal(s.scores().red.mustika, 250); assert.equal(s.ended, false);
   execute(s, r, P.next(s.view(r))); seed(s, 's2', ['blue', 'blue'], 'blue');
   const after = P.plan(scan(s, r)); assert.equal(after.tasks[0].type, 'flip'); assert.equal(after.gain, 40);

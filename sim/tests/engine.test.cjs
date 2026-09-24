@@ -90,7 +90,7 @@ test('O13: dropped Mustika returns to its original pillar',()=>{
 });
 test('O15: finite transfer capacity and top-down withdrawal',()=>{
   const s=world(),r=s.robot('redTR');at(r,F.points.red.transferTR);
-  for(let i=1;i<=4;i++){carry(s,r,[`red-E${i}`]);finishJob(s,r,{type:'unload'});}
+  for(const id of ['red-E1','red-E2','red-E3','S1','S2','S3','S4']){carry(s,r,[id]);finishJob(s,r,{type:'unload'});}
   carry(s,r,['red-E5']);assert.equal(s.freeSlot('red',s.object('red-E5')),null);
   const br=s.robot('redBR');at(br,F.points.red.transferBR);assert.match(s.validate(br,{type:'receive',objectId:'red-E1'}).reason,/上の物体/);
 });
@@ -146,7 +146,7 @@ test('B12: no post-buzzer completion and no extra motion',()=>{
 });
 test('T02: acceleration scales with speed factor, while observation time stays fixed',()=>{
   const travel=[];
-  for(const factor of [1,.75,.5,.25]) {const s=world();s.config.redSpeed=factor;const r=s.robot('redTR');s.enqueue(r.id,{type:'move',target:{x:.35,y:9.5}});s.step(.05);travel.push(10.65-r.y);assert.equal(s.config.scanSeconds,3);}
+  for(const factor of [1,.75,.5,.25]) {const s=world();s.config.redSpeed=factor;const r=s.robot('redTR');s.enqueue(r.id,{type:'move',target:{x:.35,y:9.5}});s.step(.05);travel.push(10.65-r.y);assert.equal(s.config.scanSeconds,1);}
   for(let i=0;i<4;i++)assert.ok(Math.abs(travel[i]/travel[0]-[1,.75,.5,.25][i])<1e-6);
 });
 test('lost foundation does not renumber an unsupported Earth into a valid first layer',()=>{
@@ -162,7 +162,7 @@ test('180-second continuous runs: all four speeds preserve objects, zones and ca
     assert.equal(s.time,180);assert.equal(new Set(s.objects.map(o=>o.id)).size,53);
     const held=s.robots.flatMap(r=>r.cargo);assert.equal(new Set(held).size,held.length);
     for(const o of s.objects) assert.equal(held.includes(o.id),o.location==='cargo');
-    for(const team of ['red','blue'])assert.ok(s.stock(team).length<=4);
+      for(const team of ['red','blue'])for(const [type,limit] of Object.entries(F.stockLimits))assert.ok(s.stock(team).filter(o=>o.type===type).length<=limit);
     assert.ok(s.events.some(e=>e.action==='place'));assert.ok(s.events.some(e=>e.action==='scan'));assert.ok(s.events.every(e=>e.time<=180));
   }
 });

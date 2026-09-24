@@ -1,9 +1,12 @@
 (function (root, factory) {
   const api = factory(typeof module === 'object' ? require('./field.js') : root.RoboField,
-    typeof module === 'object' ? require('./score-planner.js') : root.RoboScorePlanner);
+    typeof module === 'object' ? require('./score-planner.js') : root.RoboScorePlanner,
+    typeof module === 'object' ? require('./efficient-strategy.js') : root.RoboEfficient,
+    typeof module === 'object' ? require('./match-strategies.js') : root.RoboMatchStrategies,
+    typeof module === 'object' ? require('./competitive-strategies.js') : root.RoboCompetitive);
   if (typeof module === 'object') module.exports = api;
   else root.RoboControllers = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (F, Planner) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (F, Planner, Efficient, Match, Competitive) {
   'use strict';
   const copy = x => JSON.parse(JSON.stringify(x));
   const go = (target, label) => ({ type: 'move', target, label });
@@ -166,6 +169,10 @@
     TR: [
       { id: 'balanced', name: '基本補給 · E2+S1', shortName: '毎便 E2+S1', opening: [], repeat: { earth: 2, sky: 1, label: 'E2+S1' }, run: courier },
       { id: 'e3-e1s2', name: 'Earth先行 · E3 → E1+S2', shortName: 'E3 → E1+S2', opening: [{ earth: 3, sky: 0, label: 'E3' }, { earth: 1, sky: 2, label: 'E1+S2' }], repeat: { earth: 2, sky: 1, label: 'E2+S1' }, run: courier },
+      { id: 'adaptive', name: '効率化 · 必要量補給＋Mustika先回り', shortName: '必要量補給', opening: [], repeat: { earth: 2, sky: 1, label: '必要量に応じて変更' }, adaptive: true, run: v => Efficient.courier(v, transportPlan(v.trPlan, v.transport?.completed.length || 0)) },
+      { id: 'adaptive-e3-e1s2', name: '効率化 · E3 → E1+S2＋必要量補給', shortName: 'E3 → E1+S2・適応', opening: [{ earth: 3, sky: 0, label: 'E3' }, { earth: 1, sky: 2, label: 'E1+S2' }], repeat: { earth: 2, sky: 1, label: '必要量に応じて変更' }, adaptive: true, run: v => Efficient.courier(v, transportPlan(v.trPlan, v.transport?.completed.length || 0)) },
+      { id: 'stock-e3', name: '初便E3 → Earth3・Sky4在庫補給', shortName: 'E3 → 在庫E3/S4', opening: [{ earth: 3, sky: 0, label: 'E3' }], repeat: { earth: 2, sky: 1, label: '在庫 E3 / S4' }, adaptive: true, stockTarget: true,
+        run: v => Efficient.courier(v, transportPlan(v.trPlan, v.transport?.completed.length || 0), { stockTarget: true, lockOpening: true }) },
     ],
     BR: [
       { id: 'score-search', name: '得点探索 · 2往復先読み', shortName: '得点探索', run: Planner.next,
@@ -174,6 +181,18 @@
         details: team => [['配置優先', spotOrder(team).slice(0, 2).map(id => F.spotById[id].label).join(' → ')], ['見渡し', '受取前・受取後 / 1回で最大2個を配置']] },
       { id: 'split-seed', name: '分散先置き · 共有1＋専有1', shortName: '共有1＋専有1', run: splitBuilder,
         details: team => [['初動', splitTargets(team).map(id => `${F.spotById[id].label}にE1`).join(' / ')], ['相手が完成', '共有のSkyを自色へ反転'], ['共有が未完成', 'Earth1段: E1+S1 / 2段: S1'], ['見渡し', '受取前・受取後 / 最大2個を計画']] },
+      { id: 'efficient', name: '効率化 · まとめ運搬＋Mustika最優先', shortName: 'まとめ運搬・M優先', run: Efficient.builder,
+        details: () => [['評価', '150秒まで新規配置優先 / 以後は点差・時間'], ['通常出発', '2個とも置ける計画がある場合のみ'], ['反転', '認識済みの複数箇所をまとめて実行'], ['Mustika', '通常荷物を返却 → 直接受取 → 最優先奉納'], ['配置失敗', '現地停止・再認識 → 別配置先または返却']] },
+      { id: 'mustika-fast', name: 'Mustika最速案 · 共有＋専有から条件形成', shortName: 'Mustika最速案', run: v => Match.builder(v, 'mustika-fast'),
+        details: team => [['初動', Match.seedSpots(team).map(id => `${F.spotById[id].label}にE1`).join(' / ')], ['条件形成', '相手完成は反転 / 未完成は自力で完成'], ['条件達成後', 'Mustika直接受取・奉納を最優先'], ['150秒まで', '新規配置・専有を優先'], ['150秒以降', 'Sky配置・複数箇所の連続反転']] },
+      { id: 'earth-late', name: 'Earth固定点 → 終盤Sky', shortName: 'L2 Earth → Sky', run: v => Match.builder(v, 'earth-late'),
+        details: () => [['150秒まで', 'L2 Earth → L1専有Earth → L1共有Earth'], ['配置候補なし', '新規Sky配置 / 最後に連続反転'], ['150秒以降', 'Sky配置・連続反転で点差を優先'], ['切替時点', '進行中の作業後、次の認識から適用'], ['通常出発', '2個とも配置 / 作業失敗時は現地再計画']] },
+      { id: 'second-layer', name: '2段目狙い · E1＋S1', shortName: '2段目＋Sky', run: v => Competitive.builder(v, 'second-layer'),
+        details: () => [['狙い', 'Earth1段の土台へE1＋S1 / L2を優先'], ['土台なし', '2段目・固定点の増える建設へ'], ['150秒以降', 'Sky配置・連続反転'], ['通常出発', '2個とも配置 / Mustika・現地復旧は別扱い']] },
+      { id: 'score-adaptive', name: '点差対応 · 専有／共有', shortName: '点差で専有／共有', run: v => Competitive.builder(v, 'score-adaptive'),
+        details: () => [['リード時', '専有の加点 → Earthなどの固定点'], ['同点・追走時', '時間あたりの点差改善 / 共有反転も比較'], ['点差', '最後の停止認識時の得点 / 走行中は更新しない'], ['通常出発', '2個とも配置 / Mustikaを優先']] },
+      { id: 'endgame', name: '終盤対応 · 反転順序＋1個運搬', shortName: '終盤反転・単体運搬', run: v => Competitive.builder(v, 'endgame'),
+        details: () => [['150秒まで', 'Mustika最速案と同じ共有＋専有の条件形成'], ['150秒以降', '単体運搬も比較 / 間に合う反転順序を列挙'], ['反撃試算', '観測した相手位置からSkyの再反転を試算'], ['評価', 'Sky応答後もリード → 逆転候補 → 点差改善'], ['注意', '相手の新規建設・Mustikaは予測せず、勝利保証ではない']] },
     ],
   };
   function resolveStrategy(role, id) {
@@ -186,6 +205,12 @@
     const strategy = resolveStrategy(role, id);
     if (role === 'TR') {
       const blocks = plan => [plan.earth ? `Earth ${plan.earth}個` : '', plan.sky ? `Sky ${plan.sky}個` : ''].filter(Boolean).join(' + ');
+      if (strategy.adaptive) return [
+        ...strategy.opening.map((plan, index) => [`${index + 1}便目`, blocks(plan)]),
+        ['通常補給', strategy.stockTarget ? '在庫上限 Earth3 / Sky4、欠けた種類を最大3個補給' : '不足するEarth・Sky / 受渡の空き容量に合わせ最大3個'],
+        ['Mustika', '条件接近時に先回り / 達成後最優先 / TR保持で直接受渡'],
+        ['開幕指定', strategy.stockTarget ? '初便E3を固定 / 以後は返却枠を残して補給' : strategy.opening.length ? 'Mustika優先への移行時は短縮' : '盤面・在庫に応じて選択'],
+      ];
       const count = Math.max(2, strategy.opening.length);
       return [
         ...Array.from({ length: count }, (_, index) => [`${index + 1}便目`, blocks(transportPlan(id, index))]),
@@ -194,6 +219,11 @@
     }
     return strategy.details(team);
   }
-  function next(view) { return resolveStrategy(view.role, view.role === 'TR' ? view.trPlan : view.brPlan).run(view); }
-  return { next, sourceApproach, spotOrder, transportPlan, listStrategies, strategyDetails };
+  function next(view) {
+    const handoff = view.role === 'TR' ? Efficient.mustikaDelivery(view) : Efficient.handoffNext(view);
+    return handoff || resolveStrategy(view.role, view.role === 'TR' ? view.trPlan : view.brPlan).run(view);
+  }
+  return { next, sourceApproach, spotOrder, transportPlan, listStrategies, strategyDetails,
+    listPresets: () => [...Match.presets(), ...Competitive.presets()],
+    phase: (id, time, sanctuary, observation, team) => Competitive.ids.includes(id) ? Competitive.phase(id, time, observation, team) : Match.phase(id, time, sanctuary) };
 });

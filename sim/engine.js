@@ -9,11 +9,33 @@
   const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
   const overlap = (a, b) => a.x < b.x + b.w - 1e-7 && a.x + a.w > b.x + 1e-7 && a.y < b.y + b.h - 1e-7 && a.y + a.h > b.y + 1e-7;
   const box = (p, side) => F.rect(p.x - side / 2, p.y - side / 2, side, side);
+  function sweptContact(from, to, obstacle, half) {
+    let enter = 0, leave = 1;
+    for (const [axis, size] of [['x', 'w'], ['y', 'h']]) {
+      const low = obstacle[axis] - half + 1e-7, high = obstacle[axis] + obstacle[size] + half - 1e-7;
+      const delta = to[axis] - from[axis];
+      if (Math.abs(delta) < 1e-12) { if (from[axis] <= low || from[axis] >= high) return null; continue; }
+      const a = (low - from[axis]) / delta, b = (high - from[axis]) / delta;
+      enter = Math.max(enter, Math.min(a, b)); leave = Math.min(leave, Math.max(a, b));
+      if (enter >= leave) return null;
+    }
+    const t = (enter + leave) / 2;
+    return { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t };
+  }
   const fail = (reason, rule, kind = 'rule') => ({ ok: false, reason, rule, kind });
   const success = { ok: true };
-  const claimKey = a => ['place', 'flip', 'recover'].includes(a.type) ? `spot:${a.spotId}` : ['pickup', 'receive'].includes(a.type) ? `object:${a.objectId}` : null;
-  const DEFAULTS = { maxSpeed: 7, acceleration: 3.5, redSpeed: 1, blueSpeed: 1, redTrPlan: 'balanced', blueTrPlan: 'balanced', redBrPlan: 'score-search', blueBrPlan: 'score-search', bodySize: .5, rampFactor: .55, stairSpeed: .25, stairPause: .6, scanSeconds: 3, pickupSeconds: 1.5, placeSeconds: 2.5 };
-  const labels = { earth: 'Earth', sky: 'Sky', mustika: 'Mustika', scan: '停止・見渡し', unload: '受け渡しへ配置', receive: 'ブロック受取', place: 'タワーへ配置', flip: 'Sky反転', enshrine: 'Mustika奉納', pickup: '採集', move: '移動', retry: 'リトライ', recover: '自Earth回収' };
+  const claimKey = a => ['place', 'flip', 'recover'].includes(a.type) ? `spot:${a.spotId}` : ['pickup', 'receive', 'return'].includes(a.type) ? `object:${a.objectId}` : null;
+  const DEFAULTS = { maxSpeed: 7, acceleration: 3.5, redSpeed: 1, blueSpeed: 1, redTrPlan: 'adaptive', blueTrPlan: 'adaptive', redBrPlan: 'efficient', blueBrPlan: 'efficient', bodySize: .5, rampFactor: .55, stairSpeed: .25, stairPause: .6, scanSeconds: 1, pickupSeconds: 1.5, placeSeconds: 2.5, brAutoRetrySeconds: 5 };
+  const labels = { earth: 'Earth', sky: 'Sky', mustika: 'Mustika', scan: '停止・見渡し', unload: '受け渡しへ配置', receive: 'ブロック受取', return: '種類別置場へ返却', place: 'タワーへ配置', flip: 'Sky反転', enshrine: 'Mustika奉納', pickup: '採集', move: '移動', retry: 'リトライ', recover: '自Earth回収' };
+  const mandateHeld = (state, team, time = Infinity) => Number.isFinite(state[team]) && state[team] >= 0 && state[team] <= time;
+  const scanBudget = r => Math.max(1, r.cargo.length + Object.values(r.observation?.towers || {}).filter(t => t.at(-1)?.type === 'sky' && t.at(-1).color !== r.team && t.every(o => !o.touchedBy)).length);
+  function completedTowers(tower, team) {
+    return F.spots.filter(spot => {
+      const t = tower(spot.id);
+      return (!spot.team || spot.team === team) && t.length === 3 && t.every((o, i) => o.layer === i && !o.touchedBy)
+        && t[0].type === 'earth' && t[1].type === 'earth' && t[2].type === 'sky' && t[2].color === team;
+    });
+  }
   function initialObjects() {
     const objects = [];
     for (const team of ['red', 'blue']) for (let c = 0; c < 10; c++) for (let layer = 0; layer < 2; layer++) {
@@ -32,10 +54,10 @@
     constructor(config = {}) {
       this.config = { ...DEFAULTS, ...config };
       this.time = 0; this.ended = false; this.events = []; this.history = []; this.lastFrame = -1; this.version = 0; this.graphs = new Map();
-      this.objects = initialObjects(); this.sanctuary = { red: null, blue: null }; this.transferPoints = { red: 0, blue: 0 };
+      this.objects = initialObjects(); this.sanctuary = { red: null, blue: null }; this.sanctuaryEvidence = { red: null, blue: null }; this.transferPoints = { red: 0, blue: 0 };
       this.robots = [];
       for (const team of ['red', 'blue']) for (const role of ['TR', 'BR']) {
-        this.robots.push({ id: `${team}${role}`, team, role, ...F.points[team][`start${role}`], z: 0, enteredL1: false, cargo: [], queue: [], job: null, auto: true, velocity: 0, wait: 0, blocked: 0, status: '開始待ち', observation: null, scanLoaded: false, batchRemaining: 0, brain: { stage: 'start' }, transport: { completed: [], pending: [] }, failure: null });
+        this.robots.push({ id: `${team}${role}`, team, role, ...F.points[team][`start${role}`], z: 0, enteredL1: false, cargo: [], queue: [], job: null, auto: true, velocity: 0, wait: 0, blocked: 0, stall: null, retryPending: null, status: '開始待ち', observation: null, scanLoaded: false, batchRemaining: 0, brain: { stage: 'start' }, transport: { completed: [], pending: [] }, failure: null });
       }
       this.log(null, '開始', '初期配置を確認しました', 'setup'); this.capture();
     }
@@ -69,6 +91,13 @@
       return !robots || !this.robots.some(r => r !== robot && Math.abs(r.z - z) < .4 && overlap(box(p, this.config.bodySize + .015), box(r, this.config.bodySize + .015)));
     }
     segmentAllowed(robot, from, to, dynamic = false) {
+      // Sampled routes can miss a tiny corner overlap that a slower physical step later hits.
+      const half = this.config.bodySize / 2;
+      if (F.walls.some(w => sweptContact(from, to, w, half))) return false;
+      for (const o of this.objects) if (['source', 'transfer', 'spot'].includes(o.location) && o.type !== 'mustika') {
+        const contact = sweptContact(from, to, box(o, o.size), half);
+        if (contact) { const z = F.surface(contact).z; if (o.z + o.height > z + .03 && o.z < z + 1.2) return false; }
+      }
       const n = Math.max(1, Math.ceil(distance(from, to) / .045)); let prev = from;
       for (let i = 1; i <= n; i++) {
         const p = { x: from.x + (to.x - from.x) * i / n, y: from.y + (to.y - from.y) * i / n };
@@ -140,7 +169,15 @@
       return this.objects.filter(o => o.type === type && o.location === 'source' && (!o.team || o.team === robot.team) && !o.touchedBy && !this.objects.some(t => t !== o && t.location === 'source' && t.column && t.column === o.column && t.layer > o.layer));
     }
     observe(robot) {
-      robot.observation = { at: this.time, stock: clone(this.stock(robot.team)), towers: Object.fromEntries(F.spots.filter(s => !s.team || s.team === robot.team).map(s => [s.id, clone(this.tower(s.id))])), source: clone(this.objects.filter(o => o.location === 'source' && (!o.team || o.team === robot.team))), sanctuary: this.sanctuary[robot.team] !== null, pillar: this.object('M').location === 'pillar' ? clone(this.object('M')) : null };
+      robot.observation = { at: this.time, origin: { x: robot.x, y: robot.y }, stock: clone(this.stock(robot.team)), towers: Object.fromEntries(F.spots.filter(s => !s.team || s.team === robot.team).map(s => [s.id, clone(this.tower(s.id))])), source: clone(this.objects.filter(o => o.location === 'source' && (!o.team || o.team === robot.team))), sanctuary: mandateHeld(this.sanctuary, robot.team, this.time), sanctuaryEvidence: clone(this.sanctuaryEvidence[robot.team]), pillar: this.object('M').location === 'pillar' ? clone(this.object('M')) : null };
+      // Visible pose/cargo only: no partner plan, destination, messages or future arrival time.
+      const partner = this.robot(`${robot.team}${robot.role === 'BR' ? 'TR' : 'BR'}`);
+      robot.observation.partner = clone({ x: partner.x, y: partner.y, cargo: partner.cargo.map(id => this.object(id)) });
+      robot.observation.handoff = this.mustikaOffer(robot.team);
+      const opponent = this.robot(`${robot.team === 'red' ? 'blue' : 'red'}BR`);
+      robot.observation.scores = clone(this.scores());
+      robot.observation.opponentBR = opponent ? { x: opponent.x, y: opponent.y, z: opponent.z,
+        maxSpeed: this.config.maxSpeed * this.config[`${opponent.team}Speed`], placeSeconds: this.config.placeSeconds } : null;
     }
     view(robot) {
       const motion = Object.fromEntries(['maxSpeed', 'acceleration', 'bodySize', 'rampFactor', 'stairSpeed', 'stairPause', 'scanSeconds', 'pickupSeconds', 'placeSeconds'].map(key => [key, this.config[key]]));
@@ -148,18 +185,28 @@
       return clone({ id: robot.id, role: robot.role, team: robot.team, x: robot.x, y: robot.y, enteredL1: robot.enteredL1, cargo: robot.cargo.map(id => this.object(id)), observation: robot.observation, failure: robot.failure, brain: robot.brain, transport: robot.transport, time: this.time, motion, trPlan: this.config[`${robot.team}TrPlan`], brPlan: this.config[`${robot.team}BrPlan`] });
     }
     changed() { this.version++; this.graphs.clear(); }
+    mustikaOffer(team) {
+      const tr = this.robot(`${team}TR`), m = this.object('M'), p = F.points[team];
+      if (m.location !== 'cargo' || m.holder !== tr.id || !tr.cargo.includes('M') || tr.job || distance(tr, p.transferTR) > .14 || F.surface(tr).type !== 'transfer') return null;
+      return { objectId: 'M', holder: tr.id, x: (p.transferTR.x + p.transferBR.x) / 2, y: (p.transferTR.y + p.transferBR.y) / 2, size: m.size };
+    }
     validate(robot, action) {
       if (this.ended || this.time >= 180) return fail('競技は終了しています', '4.6.1');
+      if (robot.role === 'TR' && robot.cargo.includes('M') && this.object('M').touchedBy === `${robot.team}BR`) return fail('Mustikaを直接受け渡し中です', 'シミュレーション指定', 'physical');
       if (action.type === 'move') {
         if (!action.target || !Number.isFinite(action.target.x) || !Number.isFinite(action.target.y)) return fail('移動先を選んでください', '入力', 'physical');
         return this.footprintAllowed(robot, action.target) ? success : fail('その位置には車体を置けません。活動域・壁・段差を確認してください', 'MOVE-01～09', 'physical');
       }
-      if (action.type === 'scan') return robot.role === 'BR' && distance(robot, F.points[robot.team].home) > .12 ? fail('見渡し場所で停止する必要があります', 'ユーザー指定', 'perception') : success;
+      if (action.type === 'scan') {
+        if (action.local) return robot.role === 'BR' && robot.localRescanAllowed && robot.enteredL1 && ['l1', 'l2'].includes(F.surface(robot).type)
+          ? success : fail('その場での再認識は配置・反転失敗後に行います', 'ユーザー指定', 'perception');
+        return robot.role === 'BR' && distance(robot, F.points[robot.team].home) > .12 ? fail('見渡し場所で停止する必要があります', 'ユーザー指定', 'perception') : success;
+      }
       if (action.type === 'pickup') {
         if (robot.role !== 'TR') return fail('供給元から採集できるのはTRです', '3.4.1 / 4.5.2');
         const o = this.object(action.objectId);
         if (!o || !this.availableSource(robot, o.type).includes(o)) return fail('取得できる物体がありません', 'OBJ-11', 'physical');
-        if (o.type === 'mustika' && this.sanctuary[robot.team] === null) return fail('サンクチュアリ条件が未達成です', '4.5.1');
+        if (o.type === 'mustika' && !mandateHeld(this.sanctuary, robot.team, this.time)) return fail('サンクチュアリ条件が未達成です', '4.5.1');
         if ((o.type === 'mustika' && robot.cargo.length) || robot.cargo.some(id => this.object(id).type === 'mustika')) return fail('Mustikaとの混載は未確定です', 'OPEN-02', 'unsupported');
         if (robot.cargo.length >= 3) return fail('TRは最大3個までです', '4.4.2');
         return this.touchCheck(robot, o);
@@ -167,19 +214,42 @@
       if (action.type === 'unload') {
         if (robot.role !== 'TR') return fail('納品はTRの動作です', '3.4');
         if (!robot.cargo.length) return fail('手持ちがありません', 'OBJ-11', 'physical');
+        if (robot.cargo.includes('M')) return fail('Mustikaは床置きせず、TRが保持したままBRへ直接渡します', 'シミュレーション指定', 'unsupported');
         if (distance(robot, F.points[robot.team].transferTR) > .14 || F.surface(robot).type !== 'transfer') return fail('TRは受け渡し区画へ登って納品します', '3.4.5');
-        if (this.freeSlot(robot.team, this.object(robot.cargo[0])) === null) return fail('受け渡し区画に空きがありません', 'OBJ-11', 'physical');
+        const id = action.objectId || robot.cargo[0];
+        if (!robot.cargo.includes(id)) return fail('指定したブロックを保持していません', 'OBJ-11', 'physical');
+        if (this.freeSlot(robot.team, this.object(id)) === null) return fail('受け渡し区画に空きがありません', 'OBJ-11', 'physical');
         return success;
       }
       if (action.type === 'receive') {
         if (robot.role !== 'BR') return fail('受け取りはBRの動作です', '3.4');
         const o = this.object(action.objectId);
+        if (o?.type === 'mustika' && o.location === 'cargo') {
+          const offer = this.mustikaOffer?.(robot.team);
+          if (!offer || o.touchedBy && ![offer.holder, robot.id].includes(o.touchedBy)) return fail('自チームTRが受け渡し位置でMustikaを保持していません', 'OBJ-06', 'physical');
+          if (!mandateHeld(this.sanctuary, robot.team, this.time)) return fail('サンクチュアリ条件が未達成です', '4.5.1');
+          if (robot.cargo.length) return fail('Mustika受取前にBRの手持ちを空にしてください', 'OPEN-02', 'unsupported');
+          if (distance(robot, F.points[robot.team].transferBR) > .14) return fail('BRは受け渡し位置で直接受け取ります', 'OBJ-06', 'physical');
+          const zone = F.zones[robot.team].transfer;
+          if (!F.inside({ x: offer.x - o.size / 2, y: offer.y - o.size / 2 }, zone) || !F.inside({ x: offer.x + o.size / 2, y: offer.y + o.size / 2 }, zone)) return fail('直接受け渡す物体が区画外です', '6.3');
+          const reach = this.touchCheck(this.robot(offer.holder), offer);
+          return reach.ok ? this.touchCheck(robot, offer) : reach;
+        }
         if (!o || o.location !== 'transfer' || o.transferTeam !== robot.team || o.touchedBy) return fail('受け渡し区画に対象物がありません', '4.4.3', 'physical');
         if (!F.inside({ x: o.x - o.size / 2, y: o.y - o.size / 2 }, F.zones[robot.team].transfer) || !F.inside({ x: o.x + o.size / 2, y: o.y + o.size / 2 }, F.zones[robot.team].transfer)) return fail('物体が受け渡し区画からはみ出しています', '6.3');
         if (this.stock(robot.team).some(t => t.slot === o.slot && t.layer > o.layer)) return fail('上の物体から受け取ってください', '支持関係', 'physical');
         if (robot.cargo.length >= 2) return fail('BRは最大2個までです', '4.4.2');
         if ((o.type === 'mustika' && robot.cargo.length) || robot.cargo.some(id => this.object(id).type === 'mustika')) return fail('Mustikaとの混載は未確定です', 'OPEN-02', 'unsupported');
         return this.touchCheck(robot, o);
+      }
+      if (action.type === 'return') {
+        if (robot.role !== 'BR') return fail('返却はBRの動作です', 'ユーザー指定');
+        const o = this.object(action.objectId);
+        if (!o || !robot.cargo.includes(o.id) || o.holder !== robot.id) return fail('指定したブロックを保持していません', 'OBJ-11', 'physical');
+        if (!['earth', 'sky'].includes(o.type)) return fail('Mustikaは返却置場に置かず手渡しします', 'ユーザー指定', 'unsupported');
+        if (distance(robot, F.points[robot.team].transferBR) > .14) return fail('返却は自陣の受け渡し位置で行います', 'OBJ-05', 'physical');
+        const slot = this.freeSlot(robot.team, o, true);
+        return slot ? this.touchCheck(robot, { ...slot, size: o.size }) : fail('種類別の返却置場に空きがありません', 'OBJ-11', 'physical');
       }
       if (['place', 'flip', 'recover'].includes(action.type)) {
         if (robot.role !== 'BR') return fail('建設・反転はBRの動作です', '3.5.1');
@@ -195,8 +265,9 @@
           if (robot.cargo.length >= 2) return fail('BRは最大2個までです', '4.4.2');
           return success;
         }
-        if (!robot.observation || !robot.scanLoaded || robot.batchRemaining <= 0) return fail('見渡し場所へ戻って配置計画を更新してください', 'ユーザー指定', 'perception');
+        if (!robot.observation || !robot.scanLoaded || robot.batchRemaining <= 0) return fail('停止・見渡しを行い配置計画を更新してください', 'ユーザー指定', 'perception');
         if (action.type === 'flip') {
+          if (robot.batchFlips?.includes(spot.id)) return fail('同じ認識で同じSkyを繰り返し反転できません', 'ユーザー指定', 'perception');
           if (robot.cargo.length >= 2) return fail('Skyを持ち上げて反転するための空きがありません', '4.4.2');
           return top?.type === 'sky' ? success : fail('反転できるSkyがありません', '3.5.8', 'physical');
         }
@@ -208,7 +279,7 @@
       }
       if (action.type === 'enshrine') {
         if (robot.role !== 'BR') return fail('奉納はBRの動作です', '4.5.2');
-        if (this.sanctuary[robot.team] === null) return fail('サンクチュアリ条件が未達成です', '4.5.1');
+        if (!mandateHeld(this.sanctuary, robot.team, this.time)) return fail('サンクチュアリ条件が未達成です', '4.5.1');
         if (!robot.cargo.includes('M')) return fail('Mustikaを保持していません', 'OBJ-11', 'physical');
         if (F.surface(robot).type !== 'l2') return fail('L2に上がってください', '4.5.2');
         if (!robot.scanLoaded) return fail('受け取り後に見渡し場所で認識してください', 'ユーザー指定', 'perception');
@@ -222,20 +293,27 @@
       if (action.type === 'push') return fail('押す・引きずる運搬は禁止です', '6.1');
       return fail('この動作は未対応です', '未対応', 'unsupported');
     }
-    freeSlot(team, object) {
+    freeSlot(team, object, returning = false) {
       for (const slot of F.slots(team)) {
+        if (slot.type !== object.type) continue;
         const stack = this.stock(team).filter(o => o.slot === slot.id);
-        if (stack.length < slot.maxLayers && !stack.some(o => o.type === 'mustika') && !(object.type === 'mustika' && stack.length) && (!stack.length || stack.at(-1).size >= object.size)) return { ...slot, layer: stack.length, z: .6 + stack.reduce((sum, o) => sum + o.height, 0) };
+        const br = this.robot?.(`${team}BR`);
+        const reserved = !returning && br ? br.cargo.filter(id => this.object(id).type === object.type).length : 0;
+        if (stack.length + reserved < slot.maxLayers && !stack.some(o => o.touchedBy) && (!stack.length || stack.at(-1).size >= object.size)) return { ...slot, layer: stack.length, z: .6 + stack.reduce((sum, o) => sum + o.height, 0) };
       }
       return null;
     }
     enqueue(id, actions, manual = false) {
       const r = this.robot(id); if (!r || this.ended) return false;
       if (manual && r.job) return false;
-      if (manual) { r.auto = false; r.queue = []; r.failure = null; }
+      if (manual) { r.auto = false; r.queue = []; r.failure = null; r.stall = null; r.retryPending = null; }
       r.queue.push(...clone(Array.isArray(actions) ? actions : [actions])); return true;
     }
-    reject(r, a, result) { r.failure = result; r.status = result.reason; r.queue = []; r.job = null; r.velocity = 0; this.log(r, a.type, result.reason, result.kind, result.rule); }
+    reject(r, a, result) {
+      r.failure = { ...result, action: a.type }; r.status = result.reason; r.queue = []; r.job = null; r.velocity = 0;
+      if (r.role === 'BR' && ['place', 'flip'].includes(a.type)) { r.localRescanAllowed = true; r.scanLoaded = false; r.batchRemaining = 0; }
+      this.log(r, a.type, result.reason, result.kind, result.rule);
+    }
     startJob(r, a) {
       const result = this.validate(r, a);
       if (!result.ok) { this.reject(r, a, result); return; }
@@ -254,46 +332,107 @@
       const result = this.validate(r, job);
       if (!result.ok) { this.reject(r, job, result); return; }
       if (job.type === 'scan') {
-        this.observe(r); r.scanLoaded = true; r.batchRemaining = Math.max(1, r.cargo.length);
+        this.observe(r); r.observation.local = !!job.local; r.localRescanAllowed = false; r.scanLoaded = true; r.batchRemaining = scanBudget(r); r.batchFlips = [];
       } else if (['pickup', 'receive', 'recover'].includes(job.type)) {
         const o = job.type === 'recover' ? this.tower(job.spotId).at(-1) : this.object(job.objectId);
+        if (job.type === 'receive' && o.type === 'mustika' && o.location === 'cargo') {
+          const tr = this.robot(o.holder);
+          tr.cargo.splice(tr.cargo.indexOf(o.id), 1);
+          this.recordDelivery(tr, o);
+          this.log(tr, 'handoff', 'Mustikaを保持したままBRへ直接受け渡し', 'action', 'シミュレーション指定', { objectId: o.id, objectType: o.type, receiver: r.id });
+        }
         o.location = 'cargo'; o.holder = r.id; o.touchedBy = r.id; r.cargo.push(o.id); r.scanLoaded = false; r.batchRemaining = 0; this.changed();
+      } else if (job.type === 'return') {
+        const o = this.object(job.objectId), slot = this.freeSlot(r.team, o, true);
+        r.cargo.splice(r.cargo.indexOf(o.id), 1);
+        Object.assign(o, { location: 'transfer', holder: null, touchedBy: null, transferTeam: r.team, slot: slot.id, x: slot.x, y: slot.y, z: slot.z, layer: slot.layer });
+        r.scanLoaded = false; r.batchRemaining = 0; this.changed();
       } else if (job.type === 'unload') {
-        const o = this.object(r.cargo[0]), slot = this.freeSlot(r.team, o);
+        const o = this.object(job.objectId || r.cargo[0]), slot = this.freeSlot(r.team, o);
         job = { ...job, objectId: o.id };
-        r.cargo.shift(); Object.assign(o, { location: 'transfer', holder: null, touchedBy: null, transferTeam: r.team, slot: slot.id, x: slot.x, y: slot.y, z: slot.z, layer: slot.layer });
+        r.cargo.splice(r.cargo.indexOf(o.id), 1); Object.assign(o, { location: 'transfer', holder: null, touchedBy: null, transferTeam: r.team, slot: slot.id, x: slot.x, y: slot.y, z: slot.z, layer: slot.layer });
         if (o.type !== 'mustika' && !o.deliveries.includes(r.team)) { this.transferPoints[r.team] += 5; o.deliveries.push(r.team); }
         // Delivery progress is the TR's own history, independent of controller resets.
-        r.transport.pending.push({ id: o.id, type: o.type });
-        if (!r.cargo.length) {
-          const delivery = { number: r.transport.completed.length + 1, time: this.time, items: r.transport.pending };
-          r.transport.completed.push(delivery); r.transport.pending = [];
-          const manifest = ['earth', 'sky', 'mustika'].map(type => ({ type, count: delivery.items.filter(item => item.type === type).length })).filter(item => item.count).map(item => `${({ earth: 'E', sky: 'S', mustika: 'M' })[item.type]}${item.count}`).join('+');
-          this.log(r, 'delivery-complete', `${delivery.number}便目の納品完了 · ${manifest}`, 'action', '', { delivery: clone(delivery) });
-        }
+        this.recordDelivery(r, o);
         this.changed();
       } else if (job.type === 'place') {
         const o = this.object(job.objectId), s = F.spotById[job.spotId], tower = this.tower(s.id);
         r.cargo.splice(r.cargo.indexOf(o.id), 1);
         Object.assign(o, { location: 'spot', holder: null, touchedBy: null, spotId: s.id, x: s.x, y: s.y, z: (s.level === 1 ? .6 : .9) + tower.reduce((sum, t) => sum + t.height, 0), layer: tower.length, placedBy: o.placedBy || r.team, color: o.type === 'sky' ? r.team : null });
         r.batchRemaining--; this.changed();
-      } else if (job.type === 'flip') { this.tower(job.spotId).at(-1).color = r.team; r.batchRemaining--; }
+      } else if (job.type === 'flip') { this.tower(job.spotId).at(-1).color = r.team; r.batchRemaining--; (r.batchFlips ||= []).push(job.spotId); }
       else if (job.type === 'enshrine') {
         const o = this.object('M'); Object.assign(o, { location: 'pillar', holder: null, touchedBy: null, x: 5.5, y: 5.5, z: 1.7, placedBy: r.team }); r.cargo = r.cargo.filter(id => id !== 'M'); r.batchRemaining--; this.changed();
       } else if (job.type === 'retry') {
-        if (r.cargo.includes('M')) this.resetMustika();
-        const target = job.level === 1 ? F.points[r.team].retry : F.points[r.team][`start${r.role}`];
-        if (this.robots.some(other => other !== r && overlap(box(other, this.config.bodySize), box(target, this.config.bodySize)))) { this.reject(r, job, fail('リトライ枠が使用中です', '5.3.4', 'physical')); return; }
-        Object.assign(r, target, { z: F.surface(target).z, enteredL1: job.level === 1, observation: null, scanLoaded: false, brain: { stage: 'start' }, queue: [] });
+        const result = this.relocateForRetry(r, job.level);
+        if (!result.ok) { this.reject(r, job, result); return; }
       }
       r.job = null; r.status = '待機'; r.failure = null;
-      this.updateSanctuary(); this.log(r, job.type, `${labels[job.type]}${job.spotId ? ' · ' + F.spotById[job.spotId].label : ''}${job.objectId ? ' · ' + job.objectId : ''}`, 'action', '', { cargo: [...r.cargo], observationAt: r.observation?.at ?? null, objectId: job.objectId, objectType: this.object(job.objectId)?.type, spotId: job.spotId });
+      this.updateSanctuary(); this.log(r, job.type, `${job.type === 'scan' && job.local ? 'その場で停止・再認識' : labels[job.type]}${job.spotId ? ' · ' + F.spotById[job.spotId].label : ''}${job.objectId ? ' · ' + job.objectId : ''}`, 'action', '', { cargo: [...r.cargo], observationAt: r.observation?.at ?? null, objectId: job.objectId, objectType: this.object(job.objectId)?.type, spotId: job.spotId,
+        ...(job.type === 'scan' ? { local: !!job.local } : {}),
+        ...(job.type === 'pickup' && job.objectId === 'M' ? { sanctuaryAt: this.sanctuary[r.team], sanctuaryEvidence: clone(this.sanctuaryEvidence[r.team]) } : {}) });
+    }
+    recordDelivery(r, o) {
+      r.transport.pending.push({ id: o.id, type: o.type });
+      if (r.cargo.length) return;
+      const delivery = { number: r.transport.completed.length + 1, time: this.time, items: r.transport.pending };
+      r.transport.completed.push(delivery); r.transport.pending = [];
+      const manifest = ['earth', 'sky', 'mustika'].map(type => ({ type, count: delivery.items.filter(item => item.type === type).length })).filter(item => item.count).map(item => `${({ earth: 'E', sky: 'S', mustika: 'M' })[item.type]}${item.count}`).join('+');
+      this.log(r, 'delivery-complete', `${delivery.number}便目の納品完了 · ${manifest}`, 'action', '', { delivery: clone(delivery) });
     }
     resetMustika() { const m = this.object('M'); Object.assign(m, { location: 'source', holder: null, touchedBy: null, x: 5.5, y: 1.25, z: .5, placedBy: null }); for (const r of this.robots) r.cargo = r.cargo.filter(id => id !== 'M'); this.changed(); }
+    relocateForRetry(r, level) {
+      const target = level === 1 ? F.points[r.team].retry : F.points[r.team][`start${r.role}`];
+      const placedRobot = { ...r, enteredL1: level === 1 }, z = F.surface(target).z;
+      if (!this.footprintAllowed(placedRobot, target) || !this.obstacleFree(placedRobot, target)) return fail('リトライ枠に車体を置けません', 'MOVE-08', 'physical');
+      if (this.robots.some(other => other !== r && Math.abs(other.z - z) <= .65 && overlap(box(other, this.config.bodySize + .015), box(target, this.config.bodySize + .015)))) return fail('リトライ枠が使用中です', '5.3.4', 'physical');
+      // Commit only after checking the destination; failed retries must not release cargo.
+      if (r.cargo.includes('M')) this.resetMustika();
+      Object.assign(r, target, { z, enteredL1: level === 1, observation: null, scanLoaded: false, batchRemaining: 0,
+        brain: { stage: 'start' }, queue: [], job: null, decision: null, batchFlips: [], localRescanAllowed: false, velocity: 0, wait: 0, blocked: 0, stall: null, retryPending: null, failure: null });
+      for (const id of r.cargo) Object.assign(this.object(id), { x: r.x, y: r.y, location: 'cargo', holder: r.id, touchedBy: r.id });
+      this.changed(); return success;
+    }
+    updateAutoRetries(dt, blocked) {
+      const delay = this.config.brAutoRetrySeconds; let relocated = false;
+      for (const r of this.robots) {
+        if (r.role !== 'BR' || !r.auto || !(delay > 0)) { r.stall = null; r.retryPending = null; continue; }
+        if (!r.retryPending) {
+          if (r.job?.type !== 'move' || !r.job.route.length || r.status === '段差で姿勢合わせ') { r.stall = null; continue; }
+          // A separate clock survives the one-second path-retry counter and collision yield pauses.
+          // Accumulated displacement, not one-frame speed, distinguishes slow stairs from a jam.
+          if (r.stall && distance(r, r.stall.anchor) >= .01) { r.stall = null; r.status = r.job.label || '移動'; }
+          if (!r.stall && blocked.has(r.id)) r.stall = { since: this.time - dt, anchor: { x: r.x, y: r.y } };
+          if (!r.stall) continue;
+          const elapsed = this.time - r.stall.since;
+          r.status = `障害物待ち · 自動Retryまで ${Math.max(0, delay - elapsed).toFixed(1)}秒`;
+          if (elapsed < delay - 1e-8) continue;
+          r.retryPending = { level: r.enteredL1 ? 1 : 0, requestedAt: this.time, blockedSince: r.stall.since };
+          r.job = null; r.queue = []; r.velocity = 0; r.wait = 0; r.blocked = 0;
+          r.observation = null; r.scanLoaded = false; r.batchRemaining = 0; r.decision = null;
+          this.log(r, 'auto-retry-request', `移動停止 ${delay}秒 · 自動Retry`, 'recovery', 'シミュレーション指定', { level: r.retryPending.level, blockedSince: r.stall.since, cargo: [...r.cargo] });
+        }
+        const pending = r.retryPending, result = this.relocateForRetry(r, pending.level);
+        if (!result.ok) {
+          r.status = `自動Retry待機 · ${result.reason}`;
+          if (pending.reason !== result.reason) this.log(r, 'auto-retry-wait', r.status, 'recovery', result.rule);
+          pending.reason = result.reason; continue;
+        }
+        r.status = `自動Retry完了 · ${pending.level === 1 ? 'L1 Retryエリア' : '地上開始枠'}`;
+        this.log(r, 'retry', r.status, 'action', 'シミュレーション指定', { automatic: true, level: pending.level,
+          blockedSince: pending.blockedSince, requestedAt: pending.requestedAt, cargoPolicy: 'keep-earth-sky', cargo: [...r.cargo], observationAt: null });
+        relocated = true;
+      }
+      if (relocated) this.capture(true);
+    }
     updateSanctuary() {
       for (const team of ['red', 'blue']) {
-        const towers = F.spots.filter(s => { const t = this.tower(s.id); return t.length === 3 && t[0].type === 'earth' && t[1].type === 'earth' && t[2].type === 'sky' && t[2].color === team && t.every(o => !o.touchedBy); });
-        if (this.sanctuary[team] === null && towers.length >= 2 && towers.some(s => !s.team)) { this.sanctuary[team] = this.time; this.log(null, 'sanctuary', `${team === 'red' ? '赤' : '青'} サンクチュアリ達成`, 'milestone'); }
+        const towers = completedTowers(id => this.tower(id), team);
+        if (this.sanctuary[team] === null && towers.length >= 2 && towers.some(s => !s.team)) {
+          this.sanctuary[team] = this.time;
+          this.sanctuaryEvidence[team] = { at: this.time, towers: towers.map(s => ({ id: s.id, label: s.label, objects: clone(this.tower(s.id)) })) };
+          this.log(null, 'sanctuary', `${team === 'red' ? '赤' : '青'} サンクチュアリ達成 · ${towers.map(s => s.label).join(' / ')}`, 'milestone', '', { team, evidence: clone(this.sanctuaryEvidence[team]) });
+        }
       }
     }
     scores() {
@@ -307,7 +446,7 @@
         }
       }
       const m = this.object('M');
-      if (m.location === 'pillar' && !m.touchedBy && out[m.placedBy] && this.sanctuary[m.placedBy] !== null) out[m.placedBy].mustika = 250;
+      if (m.location === 'pillar' && !m.touchedBy && out[m.placedBy] && mandateHeld(this.sanctuary, m.placedBy)) out[m.placedBy].mustika = 250;
       for (const score of Object.values(out)) score.total = score.transfer + score.tower + score.mustika;
       return out;
     }
@@ -315,10 +454,13 @@
       if (this.ended) return;
       dt = Math.min(.05, dt, 180 - this.time);
       for (const r of this.robots) {
+        if (!r.auto) { r.stall = null; r.retryPending = null; }
+        if (r.retryPending) continue;
         if (r.wait > 0) { r.wait = Math.max(0, r.wait - dt); continue; }
         if (!r.job && !r.queue.length && r.auto && controllers) {
           if (r.role === 'TR') this.observe(r);
           const response = controllers.next(this.view(r)); r.brain = response.brain;
+          if (response.status) r.status = response.status;
           if (response.decision) {
             r.decision = clone(response.decision);
             this.log(r, 'plan', `${r.decision.summary} · 2往復内の予測加点 +${r.decision.horizonGain}`, 'plan', '', { decision: clone(r.decision) });
@@ -328,7 +470,7 @@
         }
       }
       // Lock conflicting manipulations before starting any job, independent of array order.
-      const pending = this.robots.filter(r => !r.job && r.queue.length && r.wait <= 0);
+      const pending = this.robots.filter(r => !r.retryPending && !r.job && r.queue.length && r.wait <= 0);
       const claims = new Map();
       for (const r of pending) { const key = claimKey(r.queue[0]); if (key) claims.set(key, (claims.get(key) || 0) + 1); }
       for (const r of pending) {
@@ -406,11 +548,12 @@
         this.log(null, 'end', '180秒 · 最終状態で採点', 'milestone'); this.capture(true); return;
       }
       for (const r of this.robots) if (r.job && r.job.type !== 'move') { r.job.remaining -= dt; if (r.job.remaining <= 1e-8) this.complete(r, r.job); }
+      this.updateAutoRetries(dt, blocked);
       this.capture();
     }
-    snapshot() { return clone({ time: this.time, ended: this.ended, robots: this.robots.map(({ queue, brain, ...r }) => ({ ...r, queueLength: queue.length })), objects: this.objects, scores: this.scores(), sanctuary: this.sanctuary }); }
+    snapshot() { return clone({ time: this.time, ended: this.ended, robots: this.robots.map(({ queue, brain, ...r }) => ({ ...r, queueLength: queue.length, pendingWork: [r.job, ...queue].filter(a => a && ['place', 'flip', 'enshrine', 'return'].includes(a.type)).map(({ type, spotId, objectId }) => ({ type, spotId, objectId })) })), objects: this.objects, scores: this.scores(), sanctuary: this.sanctuary, sanctuaryEvidence: this.sanctuaryEvidence }); }
     capture(force = false) { if (force || Math.floor(this.time * 2) !== this.lastFrame) { this.lastFrame = Math.floor(this.time * 2); this.history.push(this.snapshot()); } }
-    export() { return { format: 'robocon-field-sim-v1', config: this.config, assumptions: ['axis-aligned square body', 'ideal snapshot at BR home', 'two transfer columns, two layers', 'retry carrying Earth/Sky unsupported', 'no rigid-body tipping physics'], events: this.events, history: this.history, final: this.snapshot() }; }
+    export() { return { format: 'robocon-field-sim-v1', config: this.config, assumptions: ['axis-aligned square body', 'ideal snapshot at BR home or after failed work while stopped locally; includes visible partner pose/cargo', 'Earth-only transfer column: 3 layers; Sky-only: 4 layers; BR returns without extra points', 'TR unloading reserves capacity for BR held blocks; any held Earth/Sky may be selected for unloading', 'efficient BR policies require two useful normal blocks; Mustika, empty-handed flips and local recovery are exceptions', 'distinct observed Sky flips may be queued on one scan; this does not increase carry capacity', 'phase policies switch at the next planning decision on or after 150 seconds, without interrupting committed work', 'Mustika direct TR-to-BR handoff inside transfer area; no floor unloading; no mixed cargo', 'sanctuary latches after simultaneous two-tower completion including a shared tower, with timestamp and tower evidence', 'automatic BR retry after blocked movement: retain Earth/Sky, return Mustika to source', 'manual retry carrying Earth/Sky unsupported', 'no rigid-body tipping physics'], events: this.events, history: this.history, final: this.snapshot() }; }
   }
-  return { Simulation, DEFAULTS, labels, distance, box, overlap };
+  return { Simulation, DEFAULTS, labels, distance, box, overlap, completedTowers, mandateHeld, scanBudget };
 });

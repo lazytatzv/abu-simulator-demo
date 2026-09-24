@@ -43,16 +43,17 @@
           <label class="toggle-row"><span>選択した戦略で自動運転</span><input id="auto" type="checkbox" checked></label>
           <button id="stop-robot" class="stop-robot" title="移動を停止して自動運転を解除"><i data-lucide="square"></i>このロボットの移動を停止</button>
           <dl class="robot-data"><div><dt>現在の動作</dt><dd id="robot-status"></dd></div><div><dt>手持ち</dt><dd id="robot-cargo"></dd></div><div><dt>接地面 / 高さ</dt><dd id="robot-ground"></dd></div><div><dt>最後の見渡し</dt><dd id="robot-scan"></dd></div></dl>
-          <dl id="br-decision" class="robot-data" hidden><div><dt>選択した作業</dt><dd id="decision-summary"></dd></div><div><dt>今回の予測加点</dt><dd id="decision-gain"></dd></div><div><dt>2往復内の予測</dt><dd id="decision-horizon"></dd></div></dl>
+          <dl id="br-decision" class="robot-data" hidden><div><dt>選択した作業</dt><dd id="decision-summary"></dd></div><div><dt>今回の予測加点</dt><dd id="decision-gain"></dd></div><div><dt>計画全体の予測</dt><dd id="decision-horizon"></dd></div><div id="decision-assessment" hidden><dt>選択の理由</dt><dd id="decision-reason"></dd></div></dl>
+          <dl id="br-work" class="robot-data" hidden><div><dt>現在の方針</dt><dd id="robot-phase"></dd></div><div><dt>作業予定</dt><dd><ol id="pending-work"></ol></dd></div></dl>
           <dl class="robot-data" id="transport-data"><div><dt>今回の搬送目標</dt><dd id="robot-plan"></dd></div><div><dt>納品済み</dt><dd id="robot-deliveries"></dd></div></dl>
           <h2>移動先</h2><select id="destination" aria-label="移動先"></select>
           <div class="command-row"><button id="move" class="primary"><i data-lucide="navigation"></i>移動</button><button id="scan"><i data-lucide="scan-eye"></i>見渡し</button></div>
           <h2>ブロック</h2><select id="object-select" aria-label="対象ブロック"></select>
           <button id="approach-object" class="stop-robot"><i data-lucide="navigation"></i>選択したブロックへ移動</button>
-          <div class="command-grid"><button id="pickup"><i data-lucide="package-plus"></i>採集</button><button id="unload"><i data-lucide="package-check"></i>納品</button><button id="receive"><i data-lucide="hand"></i>受取</button><button id="place"><i data-lucide="layers"></i>配置</button><button id="flip"><i data-lucide="refresh-cw"></i>Sky反転</button><button id="enshrine"><i data-lucide="circle-dot"></i>奉納</button><button id="recover"><i data-lucide="package-minus"></i>自Earth回収</button><button id="retry"><i data-lucide="undo-2"></i>リトライ</button></div>
+          <div class="command-grid"><button id="pickup"><i data-lucide="package-plus"></i>採集</button><button id="unload"><i data-lucide="package-check"></i>納品</button><button id="receive"><i data-lucide="hand"></i>受取</button><button id="return"><i data-lucide="corner-down-left"></i>返却</button><button id="place"><i data-lucide="layers"></i>配置</button><button id="flip"><i data-lucide="refresh-cw"></i>Sky反転</button><button id="enshrine"><i data-lucide="circle-dot"></i>奉納</button><button id="recover"><i data-lucide="package-minus"></i>自Earth回収</button><button id="retry"><i data-lucide="undo-2"></i>リトライ</button></div>
           <div id="feedback" role="status" class="feedback">開始待ち</div>
         </section>
-        <section id="tab-state" class="tab-content" hidden><h2>受け渡し区画</h2><div id="transfer-state"></div><h2>タワー</h2><div id="tower-state"></div><h2>供給元</h2><div id="source-state"></div></section>
+        <section id="tab-state" class="tab-content" hidden><h2>受け渡し区画</h2><div id="transfer-state"></div><h2>サンクチュアリ達成履歴</h2><div id="sanctuary-state"></div><h2>タワー</h2><div id="tower-state"></div><h2>供給元</h2><div id="source-state"></div></section>
         <section id="tab-strategies" class="tab-content" hidden>
           <h2>戦略の組み合わせ</h2>
           <div id="strategy-selectors"></div>
@@ -64,18 +65,18 @@
           <label>青の速度・加速度倍率<select id="blue-speed"><option value="1">同等</option><option value="0.75">3/4</option><option value="0.5">1/2</option><option value="0.25">1/4</option></select></label>
           <label>最高速度 (m/s)<input id="max-speed" type="number" min="0.2" max="10" step="0.1" value="7"></label>
           <label>最高加速度 (m/s²)<input id="acceleration" type="number" min="0.1" max="10" step="0.1" value="3.5"></label>
-          <label>見渡し停止 (秒)<input id="scan-seconds" type="number" min="0.5" max="15" step="0.5" value="3"></label>
+          <label>見渡し停止 (秒)<input id="scan-seconds" type="number" min="0.5" max="15" step="0.5" value="1"></label>
           <label>坂の速度係数<input id="ramp-factor" type="number" min="0.1" max="1" step="0.05" value="0.55"></label>
           <label>階段の移動速度 (m/s)<input id="stair-speed" type="number" min="0.05" max="1" step="0.05" value="0.25"></label>
           <label>段ごとの停止 (秒)<input id="stair-pause" type="number" min="0.1" max="5" step="0.1" value="0.6"></label>
           <button id="apply-settings" class="primary">適用して初期化</button>
-          <details><summary>モデルの前提・未対応</summary><ul><li>車体は500 mm角。姿勢変化・転倒は未計算。</li><li>受け渡しは2列×2段、最大4個の仮設定。</li><li>見渡し時の認識は誤差・遮蔽なし。</li><li>坂・階段・把持・配置の時間は仮の性能値。</li><li>直接手渡し、Mustika混載、荷物付きリトライ、規定外の積み方は未対応。</li><li>故意の妨害・失格は自動裁定しない。</li><li>速度比較は運動性能のみを変更。撮影時間は共通。</li></ul></details>
+          <details><summary>モデルの前提・未対応</summary><ul><li>車体は500 mm角。姿勢変化・転倒は未計算。</li><li>受け渡し在庫はEarth専用3個・Sky専用4個。BRの返却分を確保する仮設定。</li><li>Mustikaは受け渡し区画内でTR保持からBRへ直接受取。床置きなし。</li><li>見渡し時の認識は誤差・遮蔽なし。配置失敗時は現地停止で再認識可。</li><li>坂・階段・把持・配置の時間は仮の性能値。</li><li>Earth/Skyの直接手渡し、Mustika混載、Earth/Sky保持中の手動リトライ、規定外の積み方は未対応。</li><li>故意の妨害・失格は自動裁定しない。</li><li>速度比較は運動性能のみを変更。撮影時間は共通。</li></ul></details>
         </section>
         <section id="tab-log" class="tab-content" hidden><div class="heading-row"><h2>動作・ルール判定</h2><label><input id="errors-only" type="checkbox">注意のみ</label></div><ol id="event-log"></ol></section>
       </aside>
     </div>
   </main>
   <footer><span>ルール基準 v1-1 · CAD準拠 2D</span><span>Original by senag</span><span id="run-summary">基本動作モード</span><a href="tactical-replay.html">旧・戦術リプレイ</a></footer>
-  <script src="vendor/astar.js"></script><script src="vendor/lucide.min.js"></script><script src="sim/field.js"></script><script src="sim/engine.js"></script><script src="sim/score-planner.js"></script><script src="sim/controllers.js"></script><script src="sim/view.js"></script>
+  <script src="vendor/astar.js"></script><script src="vendor/lucide.min.js"></script><script src="sim/field.js"></script><script src="sim/engine.js"></script><script src="sim/score-planner.js"></script><script src="sim/efficient-strategy.js"></script><script src="sim/match-strategies.js"></script><script src="sim/competitive-strategies.js"></script><script src="sim/controllers.js"></script><script src="sim/view.js"></script>
 </body>
 </html>

@@ -5,7 +5,7 @@ const F = require('../field.js');
 const controllers = require('../controllers.js');
 
 function world(config = {}) {
-  const sim = new Simulation({ redTrPlan: 'e3-e1s2', ...config });
+  const sim = new Simulation({ redTrPlan: 'e3-e1s2', blueTrPlan: 'balanced', redBrPlan: 'score-search', blueBrPlan: 'score-search', ...config });
   for (const robot of sim.robots) robot.auto = false;
   return sim;
 }
@@ -25,8 +25,8 @@ function types(delivery) { return delivery.items.map(o => o.type); }
 
 test('strategy catalog separates roles and returns isolated menu metadata', () => {
   const tr = controllers.listStrategies('TR'), br = controllers.listStrategies('BR');
-  assert.deepEqual(tr.map(s => s.id), ['balanced', 'e3-e1s2']);
-  assert.deepEqual(br.map(s => s.id), ['score-search', 'basic', 'split-seed']);
+  assert.deepEqual(tr.map(s => s.id), ['balanced', 'e3-e1s2', 'adaptive', 'adaptive-e3-e1s2', 'stock-e3']);
+  assert.deepEqual(br.map(s => s.id), ['score-search', 'basic', 'split-seed', 'efficient', 'mustika-fast', 'earth-late', 'second-layer', 'score-adaptive', 'endgame']);
   for (const entry of [...tr, ...br]) {
     assert.ok(entry.name); assert.ok(entry.shortName); assert.equal(entry.run, undefined);
   }
@@ -107,7 +107,9 @@ test('unload history advances only after the entire cargo is delivered, survives
   assert.deepEqual(r.transport.pending, [{ id: 'red-E12', type: 'earth' }]);
   r.brain = { stage: 'start' };
   assert.equal(decide(sim, r).actions.at(-1).type, 'unload');
-  unload(sim, r); unload(sim, r);
+  unload(sim, r);
+  assert.ok(sim.freeSlot('red', sim.object('red-E14')));
+  unload(sim, r);
   assert.deepEqual(types(r.transport.completed[0]), ['earth', 'earth', 'earth']);
   assert.equal(r.transport.pending.length, 0);
   r.brain = { stage: 'start' }; carry(sim, r, ['red-E13']);
@@ -123,8 +125,8 @@ test('unload history advances only after the entire cargo is delivered, survives
 test('a full handover area cannot increment the trip or discard retained cargo', () => {
   const sim = world(), r = sim.robot('redTR');
   Object.assign(r, F.points.red.transferTR, { z: .6 });
-  for (const slot of F.slots('red')) for (let layer = 0; layer < 2; layer++) {
-    const o = sim.objects.find(o => o.type === 'earth' && o.team === 'red' && o.location === 'source');
+  for (const slot of F.slots('red')) for (let layer = 0; layer < slot.maxLayers; layer++) {
+    const o = sim.objects.find(o => o.type === slot.type && (!o.team || o.team === 'red') && o.location === 'source');
     Object.assign(o, { location: 'transfer', transferTeam: 'red', slot: slot.id, x: slot.x, y: slot.y, z: .6 + layer * .35, layer });
   }
   carry(sim, r, ['red-E12', 'red-E11', 'red-E14']); r.brain.stage = 'deliver';
@@ -136,7 +138,7 @@ test('a full handover area cannot increment the trip or discard retained cargo',
 
 test('both TRs actually deliver E3 and E1+S2 at all four relative speeds', () => {
   for (const speed of [1, .75, .5, .25]) {
-    const sim = new Simulation({ redTrPlan: 'e3-e1s2', blueTrPlan: 'e3-e1s2', redSpeed: speed });
+    const sim = new Simulation({ redTrPlan: 'e3-e1s2', blueTrPlan: 'e3-e1s2', redBrPlan: 'score-search', blueBrPlan: 'score-search', redSpeed: speed });
     const trs = sim.robots.filter(r => r.role === 'TR');
     while (!sim.ended && trs.some(r => r.transport.completed.length < 2)) {
       sim.step(.05, controllers);

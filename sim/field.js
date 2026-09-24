@@ -27,6 +27,7 @@
   const base = {
     startTR: { x: .35, y: 10.65 }, startBR: { x: 1.15, y: 10.65 },
     home: { x: 3.05, y: 5.5 }, transferTR: { x: 1.8, y: 6.75 },
+    stockStandby: { x: 1.8, y: 5.65 },
     transferBR: { x: 2.9, y: 6.8 }, storage: { x: 1.05, y: 1.35 },
     sky: { x: 4.55, y: 9.75 }, mustika: { x: 4.9, y: 1.25 },
     retry: { x: 3.65, y: 2.9 }, l2: { x: 4.65, y: 5.5 },
@@ -91,8 +92,9 @@
     const dx = s.x < 5.5 ? .6 : -.6, dy = s.y < 5.5 ? .6 : -.6;
     return [{ x: s.x + dx, y: s.y + dy }, { x: s.x + dx, y: s.y }, { x: s.x, y: s.y + dy }];
   }
+  const stockLimits = { earth: 3, sky: 4 };
   function slots(team) {
-    return [6.55, 7.05].map((y, i) => ({ id: `${team}-${i}`, team, x: team === 'red' ? 2.275 : 8.725, y, maxLayers: 2 }));
+    return [6.55, 7.05].map((y, i) => ({ id: `${team}-${i}`, team, type: i === 0 ? 'earth' : 'sky', x: team === 'red' ? 2.275 : 8.725, y, maxLayers: i === 0 ? stockLimits.earth : stockLimits.sky }));
   }
-  return { rect, inside, mirror, regions, zones, points, spots, spotById, surface, territory, transition, walls, spotApproaches, slots };
+  return { rect, inside, mirror, regions, zones, points, spots, spotById, surface, territory, transition, walls, spotApproaches, slots, stockLimits };
 });

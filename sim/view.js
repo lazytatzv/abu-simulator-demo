@@ -6,7 +6,7 @@ const canvas = $('field'), ctx = canvas.getContext('2d');
 const colors = { red: '#ba3548', blue: '#2464b0', neutral: '#637166' };
 let sim = new S.Simulation(), selected = 'redTR', running = false, computing = false, replayTime = null, playback = false, selectedSpot = 'r2', clickedPoint = null, previous = 0, accumulator = 0;
 let lastLog = -1, objectKey = '', snapshot = sim.snapshot(), cssSize = 700;
-let zoom = 1;
+let zoom = 1, generation = 0, lastPlayIcon = '', paintAt = 0;
 const strategyFields = ['red', 'blue'].flatMap(team => ['TR', 'BR'].map(role => ({ team, role, key: `${team}${role === 'TR' ? 'Tr' : 'Br'}Plan`, id: `${team}-${role.toLowerCase()}-plan` })));
 const currentRobot = () => sim.robot(selected);
 function icons() { lucide.createIcons(); }
@@ -15,6 +15,15 @@ function initStrategyMenus() {
     const group = document.createElement('fieldset'), legend = document.createElement('legend');
     group.className = 'strategy-team'; legend.className = `team-${team}`;
     legend.textContent = `${team === 'red' ? '赤' : '青'}チーム`; group.append(legend);
+    const presetLabel = document.createElement('label'), preset = document.createElement('select');
+    presetLabel.textContent = '戦略モード'; preset.id = `${team}-mode`;
+    preset.replaceChildren(new Option('個別設定', ''), ...RoboControllers.listPresets().map(p => new Option(p.name, p.id)));
+    preset.onchange = () => {
+      const chosen = RoboControllers.listPresets().find(p => p.id === preset.value);
+      if (chosen) { $(`${team}-tr-plan`).value = chosen.tr; $(`${team}-br-plan`).value = chosen.br; }
+      renderStrategyPreviews(); renderStrategyState();
+    };
+    presetLabel.append(preset); group.append(presetLabel);
     for (const field of strategyFields.filter(f => f.team === team)) {
       const label = document.createElement('label'), select = document.createElement('select'), details = document.createElement('dl');
       label.textContent = `${field.role} · ${field.role === 'TR' ? '搬送戦略' : '配置戦略'}`;
@@ -36,6 +45,7 @@ function syncStrategyMenus() {
   renderStrategyPreviews();
 }
 function renderStrategyPreviews() {
+  for (const team of ['red', 'blue']) $(`${team}-mode`).value = RoboControllers.listPresets().find(p => p.tr === $(`${team}-tr-plan`).value && p.br === $(`${team}-br-plan`).value)?.id || '';
   for (const field of strategyFields) {
     $(`${field.id}-details`).replaceChildren(...RoboControllers.strategyDetails(field.role, $(field.id).value, field.team).map(([name, value]) => {
       const row = document.createElement('div'), dt = document.createElement('dt'), dd = document.createElement('dd');
@@ -50,6 +60,7 @@ function renderStrategyState() {
   $('apply-strategies').disabled = computing; $('revert-strategies').disabled = computing || !dirty;
   for (const field of strategyFields) $(field.id).disabled = computing;
   for (const team of ['red', 'blue']) {
+    $(`${team}-mode`).disabled = computing;
     $(`${team}-strategy-summary`).textContent = strategyFields.filter(f => f.team === team).map(field => {
       const entries = RoboControllers.listStrategies(field.role), entry = entries.find(e => e.id === sim.config[field.key]) || entries[0];
       return `${field.role} ${entry.shortName}`;
@@ -65,6 +76,10 @@ function cargoText(cargo, objects) {
   const counts = { earth: 0, sky: 0, mustika: 0 };
   for (const id of cargo) { const o = objects.find(o => o.id === id); if (o) counts[o.type]++; }
   return `E ${counts.earth} · S ${counts.sky}${counts.mustika ? ' · M 1' : ''}`;
+}
+function handoffReady(state, team) {
+  const tr = state.robots.find(r => r.id === `${team}TR`), m = state.objects.find(o => o.id === 'M');
+  return m.location === 'cargo' && m.holder === tr.id && tr.cargo.includes('M') && !tr.job && S.distance(tr, F.points[team].transferTR) <= .14;
 }
 function feedback(text, kind = '') { $('feedback').textContent = text; $('feedback').className = `feedback ${kind}`; }
 function destinations() {
@@ -129,7 +144,7 @@ function draw(state) {
   text(small ? 'Earth' : 'Earth保管場所', 1, 1.12, .17, colors.red, 'center', true); text(small ? 'Earth' : 'Earth保管場所', 10, 1.12, .17, colors.blue, 'center', true);
   text('Sky / 共有', 5.5, 10.58, .18, '#5e665d'); text('Mustika', 5.5, .53, .18, '#756119');
   circle({ x: 5.5, y: 1.25 }, .135, '#aaa994', '#585d4d'); circle({ x: 5.5, y: 5.5 }, .135, '#999e8c', '#585d4d');
-  for (const slot of [...F.slots('red'), ...F.slots('blue')]) { ctx.setLineDash([.04, .04]); rect(S.box(slot, .35), '#ffffff44', '#77876e', .01); ctx.setLineDash([]); }
+  for (const slot of [...F.slots('red'), ...F.slots('blue')]) { ctx.setLineDash([.04, .04]); rect(S.box(slot, .35), slot.type === 'earth' ? '#eee9dc' : '#d6e8f4', '#77876e', .01); ctx.setLineDash([]); text(slot.type === 'earth' ? 'E' : 'S', slot.x, slot.y, .15, '#647367'); }
   const piles = new Map();
   for (const o of state.objects) { if (['cargo', 'removed'].includes(o.location)) continue; const key = `${o.x.toFixed(3)}:${o.y.toFixed(3)}`; if (!piles.has(key)) piles.set(key, []); piles.get(key).push(o); }
   for (const pile of piles.values()) {
@@ -174,7 +189,8 @@ function render() {
     const score = snapshot.scores[team]; $(`${team}-score`).textContent = score.total;
     $(`${team}-detail`).textContent = `搬送 ${score.transfer} / 配置 ${score.tower} / M ${score.mustika}`;
     const mandate = $(`${team}-mandate`), done = snapshot.sanctuary[team] !== null;
-    mandate.textContent = done ? `条件達成 ${snapshot.sanctuary[team].toFixed(1)} s` : '条件未達'; mandate.className = `mandate${done ? ' done' : ''}`;
+    mandate.textContent = done ? `達成済 ${snapshot.sanctuary[team].toFixed(1)} s` : '条件未達'; mandate.className = `mandate${done ? ' done' : ''}`;
+    mandate.title = snapshot.sanctuaryEvidence?.[team]?.towers.map(t => t.label).join(' / ') || '完成2塔以上・うち共有1塔以上';
   }
   $('robots').replaceChildren(...snapshot.robots.map(r => {
     const div = document.createElement('div'); div.className = `robot-tile${r.id === selected ? ' active' : ''}`; div.tabIndex = 0; div.setAttribute('role', 'button');
@@ -188,29 +204,46 @@ function render() {
   $('decision-summary').textContent = r.decision?.summary || '未計画';
   $('decision-gain').textContent = r.decision ? `${r.decision.gain >= 0 ? '+' : ''}${r.decision.gain}点 / 約${r.decision.seconds}秒` : '';
   $('decision-horizon').textContent = r.decision ? `+${r.decision.horizonGain}点 / 約${r.decision.horizonSeconds}秒` : '';
+  const assessment = r.decision?.assessment, signed = n => `${n >= 0 ? '+' : ''}${n}点`;
+  $('decision-assessment').hidden = !assessment;
+  $('decision-reason').textContent = assessment ? `${assessment.rationale}${assessment.single ? ' / 1個運搬' : ''}${assessment.lead !== null ? ` / 観測点差 ${signed(assessment.lead)}` : ''}${assessment.skyReplyMargin !== null ? ` / Sky応答後の参考点差 ${signed(assessment.skyReplyMargin)}` : ''}` : '';
   $('robot-ground').textContent = `${({ ground: '地上', l1: 'L1', l2: 'L2', ramp: '坂', stairs: '地上階段', upperStairs: 'L2階段', transfer: '受け渡し' })[ground.type]} / ${(r.z * 1000).toFixed(0)} mm`;
-  $('robot-scan').textContent = r.observation ? `${r.observation.at.toFixed(1)} s (${(snapshot.time - r.observation.at).toFixed(1)}秒前)` : '未認識';
+  $('robot-scan').textContent = r.observation ? `${r.observation.local ? '現地 ' : ''}${r.observation.at.toFixed(1)} s (${(snapshot.time - r.observation.at).toFixed(1)}秒前)` : '未認識';
+  $('br-work').hidden = r.role !== 'BR';
+  const brPlan = sim.config[`${r.team}BrPlan`];
+  $('robot-phase').textContent = ['efficient', 'mustika-fast', 'earth-late', 'second-layer', 'score-adaptive', 'endgame'].includes(brPlan) ? RoboControllers.phase(brPlan, snapshot.time, snapshot.sanctuary[r.team] !== null, r.observation, r.team) : '個別戦略';
+  $('pending-work').replaceChildren(...(r.pendingWork?.length ? r.pendingWork : [null]).map(a => {
+    const li = document.createElement('li'); li.textContent = a ? `${a.spotId ? F.spotById[a.spotId].label + ' · ' : ''}${S.labels[a.type]}${a.objectId ? ' · ' + a.objectId : ''}` : 'なし'; return li;
+  }));
   $('transport-data').hidden = r.role !== 'TR';
   const plan = RoboControllers.transportPlan(sim.config[`${r.team}TrPlan`], r.transport.completed.length);
   $('robot-plan').textContent = `${r.transport.completed.length + 1}便目 · ${r.cargo.includes('M') ? 'M1' : plan.label}`;
   $('robot-deliveries').textContent = r.transport.completed.map(d => `${d.number}便目 ${cargoText(d.items.map(o => o.id), snapshot.objects)}`).join(' / ') || 'なし';
   if (r.failure) feedback(`${r.failure.reason} [${r.failure.rule}]`, r.failure.kind === 'rule' ? 'error' : 'warn');
-  const relevant = snapshot.objects.filter(o => r.role === 'TR' ? (o.location === 'source' && (!o.team || o.team === r.team)) || r.cargo.includes(o.id) : (o.location === 'transfer' && o.transferTeam === r.team) || r.cargo.includes(o.id));
-  const key = relevant.map(o => `${o.id}:${o.location}:${o.layer}`).join();
+  const direct = r.role === 'BR' && handoffReady(snapshot, r.team);
+  const relevant = snapshot.objects.filter(o => r.role === 'TR' ? (o.location === 'source' && (!o.team || o.team === r.team)) || r.cargo.includes(o.id) : (o.location === 'transfer' && o.transferTeam === r.team) || r.cargo.includes(o.id) || direct && o.id === 'M');
+  const key = relevant.map(o => `${o.id}:${o.location}:${o.holder}:${o.layer}`).join() + direct;
   if (key !== objectKey) {
-    const old = $('object-select').value; $('object-select').replaceChildren(...relevant.map(o => new Option(`${o.id} · ${o.type === 'earth' ? 'Earth' : o.type === 'sky' ? 'Sky' : 'Mustika'} · ${o.location === 'cargo' ? '手持ち' : o.location === 'transfer' ? '受渡' : '供給元'}${o.layer != null ? ` ${o.layer + 1}段` : ''}`, o.id)));
+    const old = $('object-select').value; $('object-select').replaceChildren(...relevant.map(o => new Option(`${o.id} · ${o.type === 'earth' ? 'Earth' : o.type === 'sky' ? 'Sky' : 'Mustika'} · ${direct && o.id === 'M' ? 'TR保持・直接受渡' : o.location === 'cargo' ? '手持ち' : o.location === 'transfer' ? '受渡' : '供給元'}${o.layer != null && o.location !== 'cargo' ? ` ${o.layer + 1}段` : ''}`, o.id)));
     if (!relevant.length) $('object-select').add(new Option('対象物なし', ''));
     if (relevant.some(o => o.id === old)) $('object-select').value = old; objectKey = key;
   }
   $('transfer-state').innerHTML = ['red', 'blue'].map(team => {
     const stock = snapshot.objects.filter(o => o.location === 'transfer' && o.transferTeam === team);
-    return `<div class="stock-row"><strong style="color:${colors[team]}">${team === 'red' ? '赤' : '青'} ${stock.length} / 4個</strong>${cargoText(stock.map(o => o.id), snapshot.objects)}<small>${stock.map(o => `${o.id} (${o.slot.split('-')[1] === '0' ? '上側' : '下側'}列 ${o.layer + 1}段)`).join('、') || '空き'}</small></div>`;
+    return `<div class="stock-row"><strong style="color:${colors[team]}">${team === 'red' ? '赤' : '青'} ${stock.length} / ${F.stockLimits.earth + F.stockLimits.sky}個</strong><div>Earth専用 ${stock.filter(o => o.type === 'earth').length}/${F.stockLimits.earth} · Sky専用 ${stock.filter(o => o.type === 'sky').length}/${F.stockLimits.sky}</div><small>${stock.map(o => `${o.id} (${o.type === 'earth' ? 'Earth' : 'Sky'}列 ${o.layer + 1}段)`).join('、') || '空き'}</small>${handoffReady(snapshot, team) ? '<small>Mustika: TR保持・直接受渡待ち</small>' : ''}</div>`;
   }).join('');
+  $('sanctuary-state').replaceChildren(...['red', 'blue'].map(team => {
+    const row = document.createElement('div'); row.className = 'stock-row';
+    const evidence = snapshot.sanctuaryEvidence?.[team];
+    row.textContent = `${team === 'red' ? '赤' : '青'}: ${evidence ? `${evidence.at.toFixed(2)}秒に ${evidence.towers.map(t => t.label).join('・')} で達成済` : snapshot.sanctuary[team] !== null ? '達成済（旧記録・根拠未保存）' : '未達成'}`;
+    return row;
+  }));
   $('tower-state').innerHTML = F.spots.map(s => {
     const t = snapshot.objects.filter(o => o.location === 'spot' && o.spotId === s.id).sort((a, b) => a.layer - b.layer);
     return `<div class="tower-row"><span>${s.label}</span>${[0, 1, 2].map(i => { const o = t[i], team = o && (o.type === 'sky' ? o.color : o.placedBy); return `<span class="block-chip ${team || ''}">${o ? `${team === 'red' ? '赤' : '青'}${o.type === 'earth' ? 'E' : 'S'}` : '―'}</span>`; }).join('')}</div>`;
   }).join('');
-  $('source-state').innerHTML = `<div class="stock-row">赤Earth ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'earth' && o.team === 'red').length} / 青Earth ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'earth' && o.team === 'blue').length}<br>共有Sky ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'sky').length}<br>Mustika: ${{ source: '初期柱', cargo: '運搬中', transfer: '受け渡し区画', pillar: '中央柱' }[snapshot.objects.find(o => o.id === 'M').location]}</div>`;
+  const m = snapshot.objects.find(o => o.id === 'M');
+  $('source-state').innerHTML = `<div class="stock-row">赤Earth ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'earth' && o.team === 'red').length} / 青Earth ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'earth' && o.team === 'blue').length}<br>共有Sky ${snapshot.objects.filter(o => o.location === 'source' && o.type === 'sky').length}<br>Mustika: ${m.location === 'cargo' ? `${m.holder.replace('red', '赤 ').replace('blue', '青 ')}が保持` : ({ source: '初期柱・未取得', transfer: '受け渡し区画', pillar: '中央柱' })[m.location]}</div>`;
   if (lastLog !== sim.events.length || replayTime !== null) {
     const events = sim.events.filter(e => e.time <= snapshot.time && (!$('errors-only').checked || !['action', 'setup', 'milestone'].includes(e.kind))).slice(-120).reverse();
     $('event-log').replaceChildren(...events.map(e => { const li = document.createElement('li'), time = document.createElement('time'), span = document.createElement('span'); time.textContent = `${e.time.toFixed(1)}s`; span.textContent = `${e.robot ? e.robot.replace('red', '赤 ').replace('blue', '青 ') + ' · ' : ''}${e.text}${e.rule ? ` [${e.rule}]` : ''}`; if (e.rule) span.className = 'rule'; li.append(time, span); return li; })); lastLog = sim.events.length;
@@ -219,11 +252,13 @@ function render() {
   document.querySelectorAll('.command-grid button,.command-row button').forEach(b => b.disabled = blocked);
   $('finish').disabled = computing || sim.ended; $('step').disabled = computing || sim.ended || replayTime !== null; $('reset').disabled = computing; $('apply-settings').disabled = computing;
   $('auto').disabled = $('stop-robot').disabled = $('approach-object').disabled = computing || replayTime !== null || sim.ended;
-  $('play').innerHTML = `<i data-lucide="${running || playback ? 'pause' : 'play'}"></i>`; icons(); draw(snapshot);
+  const playIcon = running || playback ? 'pause' : 'play';
+  if (playIcon !== lastPlayIcon) { $('play').innerHTML = `<i data-lucide="${playIcon}"></i>`; lastPlayIcon = playIcon; icons(); }
+  draw(snapshot);
   $('run-summary').textContent = sim.ended ? `${sim.events.length}件の記録 · 試合終了` : replayTime !== null ? '記録済み軌跡' : '基本動作モード';
   renderStrategyState();
 }
-function reset(config = sim.config, { preserveStrategyDraft = false } = {}) { sim = new S.Simulation(config); running = false; computing = false; replayTime = null; playback = false; accumulator = 0; lastLog = -1; objectKey = ''; if (!preserveStrategyDraft) syncStrategyMenus(); feedback('初期配置に戻しました'); render(); }
+function reset(config = sim.config, { preserveStrategyDraft = false } = {}) { generation++; RoboScorePlanner.clearCache(); sim.graphs.clear(); sim = new S.Simulation(config); running = false; computing = false; replayTime = null; playback = false; accumulator = 0; lastLog = -1; objectKey = ''; paintAt = 0; if (!preserveStrategyDraft) syncStrategyMenus(); feedback('初期配置に戻しました · 計算キャッシュを更新'); render(); }
 $('play').onclick = () => {
   if (computing) return;
   if (sim.ended && replayTime === null) replayTime = 0;
@@ -234,13 +269,14 @@ $('step').onclick = () => { running = false; for (let i = 0; i < 10; i++) sim.st
 $('reset').onclick = () => reset();
 $('finish').onclick = () => {
   running = false; computing = true; replayTime = null; render();
-  function chunk() { const stop = performance.now() + 60; while (!sim.ended && performance.now() < stop) sim.step(.05, RoboControllers); render(); if (!sim.ended) requestAnimationFrame(chunk); else { computing = false; render(); } }
+  const run = generation;
+  function chunk() { if (run !== generation) return; const stop = performance.now() + 60; while (!sim.ended && performance.now() < stop) sim.step(.05, RoboControllers); render(); if (!sim.ended) requestAnimationFrame(chunk); else { computing = false; render(); } }
   requestAnimationFrame(chunk);
 };
 $('timeline').oninput = () => { running = false; playback = false; const t = Math.min(Number($('timeline').value), sim.time); replayTime = t >= sim.time - .01 ? null : t; lastLog = -1; render(); };
-$('auto').onchange = () => { const r = currentRobot(); r.auto = $('auto').checked; if (r.auto) r.brain = { stage: r.role === 'BR' && r.cargo.length ? 'return' : 'start' }; else r.queue = []; render(); };
+$('auto').onchange = () => { const r = currentRobot(); r.auto = $('auto').checked; if (r.auto) r.brain = { stage: r.role === 'BR' && r.cargo.length ? 'return' : 'start' }; else { r.queue = []; r.stall = null; r.retryPending = null; } render(); };
 $('stop-robot').onclick = () => {
-  const r = currentRobot(); r.auto = false; r.queue = [];
+  const r = currentRobot(); r.auto = false; r.queue = []; r.stall = null; r.retryPending = null;
   if (r.job && r.job.type !== 'move') { feedback('把持・配置中の動作が完了したら停止します', 'warn'); }
   else { r.job = null; r.velocity = 0; r.wait = 0; r.status = '手動停止'; feedback('移動と自動運転を停止しました'); }
   sim.log(r, 'stop', '移動停止・後続動作解除'); render();
@@ -260,13 +296,13 @@ $('apply-strategies').onclick = () => {
 $('revert-strategies').onclick = () => { syncStrategyMenus(); renderStrategyState(); };
 $('destination').onchange = () => { clickedPoint = null; if (F.spotById[$('destination').value]) selectedSpot = $('destination').value; render(); };
 $('move').onclick = () => send({ type: 'move', target: clickedPoint || targetList.find(([id]) => id === $('destination').value)[2], label: '指定位置へ移動' });
-$('scan').onclick = () => send({ type: 'scan' });
+$('scan').onclick = () => send({ type: 'scan', ...(currentRobot().localRescanAllowed ? { local: true } : {}) });
 $('approach-object').onclick = () => {
   const o = sim.object($('object-select').value), r = currentRobot();
-  if (!o || o.location === 'cargo') { feedback('供給元または受け渡し区画のブロックを選んでください', 'warn'); return; }
+  if (!o || o.location === 'cargo' && !(r.role === 'BR' && o.id === 'M' && sim.mustikaOffer(r.team))) { feedback('供給元・受け渡し在庫・TR保持中のMustikaを選んでください', 'warn'); return; }
   send({ type: 'move', target: o.location === 'source' ? RoboControllers.sourceApproach(o, r.team) : F.points[r.team][r.role === 'BR' ? 'transferBR' : 'transferTR'], label: `${o.id}へ移動` });
 };
-for (const type of ['pickup', 'receive', 'place', 'flip', 'unload', 'enshrine', 'recover']) $(type).onclick = () => send({ type, objectId: $('object-select').value, spotId: selectedSpot });
+for (const type of ['pickup', 'receive', 'return', 'place', 'flip', 'unload', 'enshrine', 'recover']) $(type).onclick = () => send({ type, objectId: $('object-select').value, spotId: selectedSpot });
 $('retry').onclick = () => send({ type: 'retry', level: currentRobot().role === 'BR' && currentRobot().enteredL1 ? 1 : 0 });
 $('show-path').onchange = $('show-body').onchange = () => draw(snapshot);
 $('errors-only').onchange = () => { lastLog = -1; render(); };
@@ -291,8 +327,8 @@ canvas.addEventListener('pointerdown', e => {
 const observer = new ResizeObserver(() => { cssSize = canvas.getBoundingClientRect().width; canvas.width = canvas.height = Math.round(cssSize * Math.min(2, devicePixelRatio || 1)); draw(snapshot); }); observer.observe(canvas);
 function tick(now) {
   const dt = previous ? Math.min(.15, (now - previous) / 1000) : 0; previous = now;
-  if (playback && replayTime !== null) { replayTime += dt * Number($('rate').value); if (replayTime >= sim.time) { replayTime = null; playback = false; } render(); }
-  else if (running && !computing && !sim.ended) { accumulator += dt * Number($('rate').value); const stop = performance.now() + 30; while (accumulator >= .05 && performance.now() < stop) { sim.step(.05, RoboControllers); accumulator -= .05; } if (sim.ended) running = false; render(); }
+  if (playback && replayTime !== null) { replayTime += dt * Number($('rate').value); if (replayTime >= sim.time) { replayTime = null; playback = false; } if (now - paintAt >= 50 || !playback) { render(); paintAt = now; } }
+  else if (running && !computing && !sim.ended) { accumulator += dt * Number($('rate').value); const stop = performance.now() + 30; while (accumulator >= .05 && performance.now() < stop) { sim.step(.05, RoboControllers); accumulator -= .05; } if (sim.ended) running = false; if (now - paintAt >= 50 || sim.ended) { render(); paintAt = now; } }
   requestAnimationFrame(tick);
 }
 window.fieldApp = { get sim() { return sim; }, reset, render, selectRobot: chooseRobot };
